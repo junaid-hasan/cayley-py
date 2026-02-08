@@ -55,7 +55,7 @@ class KoltsovExplorer:
         output_dir: str = "results",
         min_n: int = 4,
         max_n: int = 30,
-        max_d: int = 10,
+        max_d: Optional[int] = None,
     ):
         """
         Initialize KoltsovExplorer.
@@ -68,6 +68,7 @@ class KoltsovExplorer:
             min_n: Default minimum n value for experiments.
             max_n: Default maximum n value for experiments.
             max_d: Maximum d value for perm_type=1 experiments.
+                   If None, uses the natural bound (d < n - k).
         """
         if perm_type not in (1, 2):
             raise ValueError(f"perm_type must be 1 or 2, got {perm_type}")
@@ -112,6 +113,21 @@ class KoltsovExplorer:
     def _is_valid_central(self, central: Optional[List[int]]) -> bool:
         """Check if central state has >1 unique value."""
         return central is not None and len(np.unique(central)) > 1
+
+    def _get_d_values(self, n: int, k: int, d_range: Optional[tuple] = None) -> List[int]:
+        """
+        Get valid d values for given n and k.
+
+        If d_range is specified, uses that range.
+        If max_d is set, uses range(1, max_d + 1).
+        Otherwise, uses the natural bound: range(1, n - k).
+        """
+        if d_range:
+            return list(range(d_range[0], d_range[1] + 1))
+        if self.max_d is not None:
+            return list(range(1, self.max_d + 1))
+        # Natural bound: k + d < n => d < n - k
+        return list(range(1, max(1, n - k)))
 
     def run_single_experiment(
         self,
@@ -204,7 +220,7 @@ class KoltsovExplorer:
             min_n: Minimum n value (defaults to instance config).
             max_n: Maximum n value (defaults to instance config).
             k_range: Tuple (k_min, k_max) or None for full range.
-            d_range: Tuple (d_min, d_max) for perm_type=1, or None for default.
+            d_range: Tuple (d_min, d_max) for perm_type=1, or None for dynamic range.
             coset_filter: Filter cosets - None (all), str (single), or list.
             skip_computed: If True, skip already computed combinations.
 
@@ -224,11 +240,6 @@ class KoltsovExplorer:
 
         # Build parameter ranges
         k_values = list(range(k_range[0], k_range[1] + 1)) if k_range else list(range(max_n))
-
-        if self.perm_type == 1:
-            d_values = list(range(d_range[0], d_range[1] + 1)) if d_range else list(range(1, self.max_d + 1))
-        else:
-            d_values = [None]  # perm_type=2 doesn't use d
 
         results = {
             "metadata": {
@@ -250,54 +261,69 @@ class KoltsovExplorer:
             computed_count = 0
             results["results"][coset_name] = {}
 
-            # Create progress bar
-            total_iterations = len(d_values) * len(k_values) * (max_n - min_n + 1)
+            # Estimate total iterations for progress bar
+            total_iterations = len(k_values) * (max_n - min_n + 1)
             pbar = tqdm(total=total_iterations, desc=f"{coset_name}", leave=True)
 
-            for d in d_values:
-                if self.perm_type == 1:
-                    d_key = f"d={d}"
-                    results["results"][coset_name][d_key] = {}
+            for k in k_values:
+                k_key = f"k={k}"
+                if self.perm_type != 1:
+                    results["results"][coset_name][k_key] = {}
 
-                for k in k_values:
-                    k_key = f"k={k}"
+                for n in range(min_n, max_n + 1):
                     if self.perm_type == 1:
-                        results["results"][coset_name][d_key][k_key] = {}
-                    else:
-                        results["results"][coset_name][k_key] = {}
+                        # Dynamic d range based on n and k
+                        d_values = self._get_d_values(n, k, d_range)
+                        for d in d_values:
+                            d_key = f"d={d}"
+                            if d_key not in results["results"][coset_name]:
+                                results["results"][coset_name][d_key] = {}
+                            if k_key not in results["results"][coset_name][d_key]:
+                                results["results"][coset_name][d_key][k_key] = {}
 
-                    for n in range(min_n, max_n + 1):
-                        if self.perm_type == 1:
                             pbar.set_postfix({"d": d, "k": k, "n": n})
-                        else:
-                            pbar.set_postfix({"k": k, "n": n})
-                        pbar.update(1)
 
-                        if not self.is_valid_params(n, k, d):
+                            if not self.is_valid_params(n, k, d):
+                                continue
+
+                            cache_key = (coset_name, d, k, n)
+                            if cache_key in computed:
+                                skipped += 1
+                                continue
+
+                            result = self.run_single_experiment(n, k, coset_name, coset_func, d)
+                            if result is not None:
+                                result_dict = {
+                                    "diameter": result.diameter,
+                                    "growth": result.growth,
+                                    "last_layer_size": result.last_layer_size,
+                                }
+                                results["results"][coset_name][d_key][k_key][f"n={n}"] = result_dict
+                                computed_count += 1
+                    else:
+                        pbar.set_postfix({"k": k, "n": n})
+
+                        if not self.is_valid_params(n, k):
+                            pbar.update(1)
                             continue
 
-                        # Check cache
-                        if self.perm_type == 1:
-                            cache_key = (coset_name, d, k, n)
-                        else:
-                            cache_key = (coset_name, k, n)
-
+                        cache_key = (coset_name, k, n)
                         if cache_key in computed:
                             skipped += 1
+                            pbar.update(1)
                             continue
 
-                        result = self.run_single_experiment(n, k, coset_name, coset_func, d)
+                        result = self.run_single_experiment(n, k, coset_name, coset_func)
                         if result is not None:
                             result_dict = {
                                 "diameter": result.diameter,
                                 "growth": result.growth,
                                 "last_layer_size": result.last_layer_size,
                             }
-                            if self.perm_type == 1:
-                                results["results"][coset_name][d_key][k_key][f"n={n}"] = result_dict
-                            else:
-                                results["results"][coset_name][k_key][f"n={n}"] = result_dict
+                            results["results"][coset_name][k_key][f"n={n}"] = result_dict
                             computed_count += 1
+
+                    pbar.update(1)
 
             pbar.close()
             total_new += computed_count

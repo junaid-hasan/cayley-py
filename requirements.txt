@@ -9,3 +9,5 @@ numba
 h5py
 kagglehub
 pytest
+cayleypy @ git+https://github.com/cayleypy/cayleypy 
+ipywidgets
